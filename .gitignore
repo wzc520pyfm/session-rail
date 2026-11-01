@@ -1,0 +1,5 @@
+.superpowers/
+node_modules/
+lib/
+dist/
+coverage/

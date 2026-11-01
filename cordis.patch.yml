@@ -1,0 +1,4 @@
+# Register the Session Rail plugin in the active DSH profile.
+- insert:
+    - id: session-rail
+      name: session-rail
