@@ -3,8 +3,15 @@ import { header, HttpError, isSameOrigin, readJsonBody, sendError, sendJson } fr
 import type { SessionSnapshot } from '../shared/types.ts'
 
 export const name = 'session-rail'
-export const inject = ['webServer', 'sessions']
+export const inject = ['webServer', 'sessions', 'agents']
 const PREFIX = '/api/session-rail'
+const COMMIT_INSTRUCTION = 'Commit the working tree changes with a sensible message.'
+interface UserMessage {
+  id: string
+  role: 'user'
+  content: readonly [{ type: 'text'; text: string }]
+  source: { kind: 'user' }
+}
 interface Request { method?: string; url?: string; headers: Record<string, string | string[] | undefined> }
 interface Response { writeHead(status: number, headers: Record<string, string>): void; end(body?: string): void }
 type Handler = (req: Request, res: Response) => Promise<void> | void
@@ -12,6 +19,7 @@ interface HostContext {
   effect?(callback: () => void | (() => void), label?: string): void
   webServer?: { register(route: { kind: string; path: string; handler: Handler }): () => void }
   sessions?: { get(id: string): SessionLike | undefined | null }
+  agents?: { get(id: string): { followup?: (message: UserMessage) => void } | undefined | null }
 }
 
 export function apply(ctx: HostContext): void {
@@ -35,7 +43,21 @@ async function route(ctx: HostContext, req: Request, res: Response): Promise<voi
     if (!session) throw new HttpError(404, 'session_not_found', 'Session was not found')
     const current = await snapshot(sessionId, session)
     if (url.pathname === `${PREFIX}/snapshot`) {
-      sendJson(res, 200, { ok: true, data: publicSnapshot(current) }); return
+      const agent = ctx.agents?.get(sessionId)
+      sendJson(res, 200, { ok: true, data: { ...publicSnapshot(current), followupAvailable: typeof agent?.followup === 'function' } }); return
+    }
+    if (url.pathname === `${PREFIX}/commit-request`) {
+      const agent = ctx.agents?.get(sessionId)
+      if (typeof agent?.followup !== 'function') throw new HttpError(409, 'agent_unavailable', 'No active agent is available for this session')
+      const message: UserMessage = {
+        id: crypto.randomUUID(),
+        role: 'user',
+        content: [{ type: 'text', text: COMMIT_INSTRUCTION }],
+        source: { kind: 'user' },
+      }
+      try { agent.followup(message) }
+      catch { throw new HttpError(503, 'agent_followup_failed', 'Agent could not accept the commit request') }
+      sendJson(res, 200, { ok: true, data: { accepted: true } }); return
     }
     if (url.pathname === `${PREFIX}/diff`) {
       if (typeof body.path !== 'string' || !body.path || body.path.length > 4096) throw new HttpError(400, 'invalid_path', 'A valid changed-file path is required')

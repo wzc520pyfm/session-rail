@@ -1,4 +1,4 @@
-import React, { useCallback } from 'react'
+import React, { useCallback, useEffect, useState } from 'react'
 import { RailPane } from './pane.tsx'
 import { ensureRailStyle } from './styles.ts'
 import { t } from './i18n.ts'
@@ -18,7 +18,12 @@ interface SlotProps {
 interface PluginItem { moduleName?: string; entryId?: string; fiberPhase?: string | null; enabled?: boolean }
 interface ClientContext {
   slots: { inject(name: string, register: () => () => void): () => void; register(def: Record<string, unknown>, component: (props: SlotProps) => React.ReactElement): () => void }
-  sidebarRightTabs?: { register(def: Record<string, unknown>): () => void }
+  sidebarRightTabs?: {
+    register(def: Record<string, unknown>): () => void
+    entries?: () => ReadonlyArray<{ kind: string; title: () => string; patterns?: readonly string[] }>
+    getSnapshot?: () => ReadonlyArray<{ kind: string; title: () => string; patterns?: readonly string[] }>
+    subscribe?: (listener: () => void) => () => void
+  }
   sidebarRight?: { openTab(kind: string): unknown }
   remote?: { pluginInventory?: { list?: () => Promise<{ entries?: PluginItem[] }> } }
   effect?: (fn: () => void | (() => void), label?: string) => void
@@ -39,6 +44,9 @@ export function apply(ctx: ClientContext): void {
 }
 
 function SessionRailTab(props: SlotProps): React.ReactElement {
+  const [, setTabsRevision] = useState(0)
+  const tabsRegistry = pluginContext?.sidebarRightTabs
+  useEffect(() => tabsRegistry?.subscribe?.(() => setTabsRevision(value => value + 1)), [tabsRegistry])
   const info = props.useTabInfo?.()
   const sessionId = props.sessionId || info?.sessionId || info?.tab?.sessionId || ''
   const projectedCwd = props.useProjection?.<string | null>('workingDirectory')
@@ -46,13 +54,19 @@ function SessionRailTab(props: SlotProps): React.ReactElement {
   const breakdown = props.useProjection?.<ContextBreakdown>('contextBreakdown')
   const usage = props.useProjection?.<TokenUsageProjection>('tokenUsage')
   const inventory = pluginContext?.remote?.pluginInventory
+  let tabs: ReadonlyArray<{ kind: string; title: () => string; patterns?: readonly string[] }> = []
+  try { tabs = tabsRegistry?.entries?.() ?? tabsRegistry?.getSnapshot?.() ?? [] } catch { /* sidebar registry may be unavailable during startup */ }
+  tabs = tabs.filter(tab => tab.kind !== KIND && (!tab.patterns || tab.patterns.length === 0))
+  const openTab = pluginContext?.sidebarRight?.openTab
   const loadPlugins = useCallback(async () => {
     if (!inventory?.list) return []
     const snapshot = await inventory.list()
     return Array.isArray(snapshot?.entries) ? snapshot.entries : []
   }, [inventory])
-  return <RailPane key={sessionId} sessionId={sessionId} cwd={projectedCwd || undefined} pressure={pressure} breakdown={breakdown} usage={usage} loadPlugins={inventory?.list ? loadPlugins : undefined} />
+  return <RailPane key={sessionId} sessionId={sessionId} cwd={projectedCwd || undefined} pressure={pressure} breakdown={breakdown} usage={usage} loadPlugins={inventory?.list ? loadPlugins : undefined} activeTabs={tabs.map(tab => ({ kind: tab.kind, title: safeTitle(tab.title) }))} openTab={openTab ? kind => openTab.call(pluginContext?.sidebarRight, kind) : undefined} />
 }
+
+function safeTitle(title: () => string): string { try { return String(title()) } catch { return '' } }
 
 function SessionRailOpener(): React.ReactElement {
   return <button type="button" className="dsr-header-open" onClick={() => pluginContext?.sidebarRight?.openTab(KIND)} aria-label={t('environment')} title={t('environment')}>▤</button>

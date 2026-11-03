@@ -1,4 +1,4 @@
-import type { ApiEnvelope, ApiErrorEnvelope, FileDiff, SessionSnapshot } from '../shared/types.ts'
+import type { ApiEnvelope, ApiErrorEnvelope, CommitRequestResult, FileDiff, SessionSnapshot } from '../shared/types.ts'
 
 const PREFIX = '/api/session-rail'
 
@@ -23,3 +23,4 @@ async function post<T>(path: string, payload: object, signal?: AbortSignal): Pro
 
 export const getSnapshot = (sessionId: string, signal?: AbortSignal) => post<SessionSnapshot>('snapshot', { sessionId }, signal)
 export const getDiff = (sessionId: string, path: string, signal?: AbortSignal) => post<FileDiff>('diff', { sessionId, path }, signal)
+export const requestCommit = (sessionId: string, signal?: AbortSignal) => post<CommitRequestResult>('commit-request', { sessionId }, signal)

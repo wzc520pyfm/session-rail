@@ -1,12 +1,18 @@
 /** Read-only workspace snapshot resolved by the Host for one DSH Session. */
 export interface SessionSnapshot {
   sessionId: string
+  /** Whether the Host can deliver a follow-up to this Session's active Agent. */
+  followupAvailable?: boolean
   cwd?: string
   branch?: string
   repositoryStatus: RepositoryStatus
   changedFiles: ChangedFile[]
   /** Host-internal repository root; stripped from API responses. */
   repoRoot?: string
+}
+
+export interface CommitRequestResult {
+  accepted: true
 }
 
 export type RepositoryStatus =

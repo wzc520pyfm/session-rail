@@ -2,9 +2,14 @@ import type { ApiErrorEnvelope } from '../shared/types.ts'
 export const MAX_BODY_BYTES = 16 * 1024
 export function isSameOrigin(headers: Record<string, string | string[] | undefined>): boolean {
   const site = header(headers, 'sec-fetch-site').toLowerCase()
-  if (site && site !== 'same-origin' && site !== 'same-site' && site !== 'none') return false
   const origin = header(headers, 'origin'), host = header(headers, 'host')
-  if (!origin || !host || /[\r\n]/.test(host)) return false
+  if (!host || /[\r\n]/.test(host)) return false
+  // DSH Desktop's dsh-app:// bridge validates the renderer origin, then removes
+  // browser-only origin metadata before forwarding to its authenticated Host.
+  // Permit that bridge shape while keeping browser requests strict.
+  if (!origin && !site) return true
+  if (site && site !== 'same-origin' && site !== 'same-site' && site !== 'none') return false
+  if (!origin) return false
   try { const parsed = new URL(origin); return ['http:', 'https:'].includes(parsed.protocol) && parsed.host.toLowerCase() === host.toLowerCase() && parsed.origin === origin.replace(/\/$/, '') } catch { return false }
 }
 export function header(headers: Record<string, string | string[] | undefined>, name: string): string { const value = headers[name] ?? headers[name.toLowerCase()]; return Array.isArray(value) ? value[0] ?? '' : value ?? '' }

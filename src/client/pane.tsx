@@ -1,14 +1,15 @@
-import React, { useEffect, useMemo, useState } from 'react'
-import { getDiff, getSnapshot, RailApiError } from './api.ts'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { getDiff, getSnapshot, requestCommit, RailApiError } from './api.ts'
 import { t } from './i18n.ts'
 import { ensureRailStyle } from './styles.ts'
 import type { ChangedFile, ContextBreakdown, ContextPressure, FileDiff, SessionSnapshot, TokenUsageProjection, UnifiedDiffLine } from '../shared/types.ts'
 
 interface PluginItem { moduleName?: string; entryId?: string; fiberPhase?: string | null; enabled?: boolean }
-interface Props { sessionId: string; cwd?: string; pressure?: ContextPressure; breakdown?: ContextBreakdown; usage?: TokenUsageProjection; loadPlugins?: () => Promise<PluginItem[]> }
+interface TabChoice { kind: string; title: string }
+interface Props { sessionId: string; cwd?: string; pressure?: ContextPressure; breakdown?: ContextBreakdown; usage?: TokenUsageProjection; loadPlugins?: () => Promise<PluginItem[]>; activeTabs?: TabChoice[]; openTab?: (kind: string) => unknown }
 
 export function RailPane(props: Props): React.ReactElement {
-  const { sessionId, cwd, pressure, breakdown, usage, loadPlugins } = props
+  const { sessionId, cwd, pressure, breakdown, usage, loadPlugins, activeTabs = [], openTab } = props
   const [snapshot, setSnapshot] = useState<SessionSnapshot | null>(null)
   const [snapshotError, setSnapshotError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -20,6 +21,12 @@ export function RailPane(props: Props): React.ReactElement {
   const [diff, setDiff] = useState<FileDiff | null>(null)
   const [diffError, setDiffError] = useState<string | null>(null)
   const [diffLoading, setDiffLoading] = useState(false)
+  const [chosenKind, setChosenKind] = useState('codex-review')
+  const [commitState, setCommitState] = useState<'idle' | 'sending' | 'queued' | 'error'>('idle')
+  const commitInFlight = useRef(false)
+  const [routeHint, setRouteHint] = useState(false)
+  const storageKey = 'session-rail:selected-review-kind'
+  useEffect(() => { try { const saved = localStorage.getItem(storageKey); setChosenKind(saved || 'codex-review') } catch { setChosenKind('codex-review') } }, [])
   useEffect(() => { ensureRailStyle() }, [])
 
   useEffect(() => {
@@ -57,6 +64,22 @@ export function RailPane(props: Props): React.ReactElement {
   const files = snapshot?.changedFiles ?? []
   const displayCwd = cwd ?? snapshot?.cwd
   const totals = files.reduce((sum, file) => ({ add: sum.add + file.additions, del: sum.del + file.deletions }), { add: 0, del: 0 })
+  const normalizedTarget = chosenKind.trim()
+  const targetExists = activeTabs.some(tab => tab.kind === normalizedTarget)
+  const commitDisabledReason = !sessionId ? t('commitNoSession') : loading ? t('loading') : files.length === 0 ? t('commitNoFiles') : snapshot?.followupAvailable !== true ? t('commitNoAgent') : null
+
+  function selectFile(path: string) {
+    setRouteHint(false)
+    if (selected === path) { setSelected(null); return }
+    if (normalizedTarget && openTab) {
+      try {
+        const result = openTab(normalizedTarget)
+        if (result !== false) { setSelected(null); return }
+      } catch { /* fall through to the inline diff */ }
+    }
+    setSelected(path)
+    setRouteHint(true)
+  }
 
   function toggle(key: string) { setCollapsed(value => ({ ...value, [key]: !value[key] })) }
   return <div className="dsr">
@@ -83,13 +106,17 @@ export function RailPane(props: Props): React.ReactElement {
       {plugins?.map((plugin, index) => <div className="dsr-plugin" key={plugin.entryId ?? `${plugin.moduleName ?? 'plugin'}-${index}`}><span title={plugin.entryId}>{plugin.moduleName ?? plugin.entryId ?? 'Plugin'}</span><span className="dsr-stats">{plugin.enabled === false ? t('disabled') : plugin.fiberPhase === 'failed' ? t('error') : plugin.fiberPhase === 'loading' || plugin.fiberPhase === 'unloading' ? t('loading') : t('enabled')}</span></div>)}
     </Card>
     <Card title={t('changes')} collapsed={!!collapsed.changes} onToggle={() => toggle('changes')} action={<button className="dsr-refresh" type="button" aria-label={t('refresh')} title={t('refresh')} onClick={() => setRevision(value => value + 1)}>↻</button>}>
+      <div className="dsr-actions"><label>{t('reviewTarget')} <input className="dsr-target" list="dsr-review-targets" value={chosenKind} spellCheck={false} autoCapitalize="none" onChange={event => { const kind = event.target.value; setChosenKind(kind); try { localStorage.setItem(storageKey, kind) } catch { /* storage may be unavailable */ } }} onBlur={() => { const kind = chosenKind.trim(); if (kind !== chosenKind) { setChosenKind(kind); try { localStorage.setItem(storageKey, kind) } catch { /* storage may be unavailable */ } } }} placeholder="codex-review" aria-label={t('reviewTarget')} /><span className="dsr-chip" title={targetExists ? t('enabled') : t('unavailable')}>{targetExists ? t('enabled') : t('unavailable')}</span></label><datalist id="dsr-review-targets">{activeTabs.map(tab => <option key={tab.kind} value={tab.kind}>{tab.title}</option>)}</datalist>
+      <button type="button" className="dsr-commit" disabled={!!commitDisabledReason || commitState === 'sending'} title={commitDisabledReason ?? undefined} onClick={async () => { if (commitInFlight.current || commitDisabledReason) return; commitInFlight.current = true; setCommitState('sending'); try { await requestCommit(sessionId); setCommitState('queued') } catch { setCommitState('error') } finally { commitInFlight.current = false } }}>{commitState === 'sending' ? t('commitSending') : t('commitChanges')}</button></div>
+      {commitDisabledReason ? <Status>{commitDisabledReason}</Status> : null}{commitState === 'error' ? <Status error>{t('commitError')}</Status> : null}{commitState === 'queued' ? <Status>{t('commitQueued')}</Status> : null}
       <div className="dsr-row"><span>{snapshot ? t('files')(files.length) : t('loading')}</span><span className="dsr-stats"><span className="dsr-add">+{totals.add}</span> <span className="dsr-del">−{totals.del}</span></span></div>
       {snapshot?.repositoryStatus === 'no-cwd' ? <Status>{t('noCwd')}</Status> : null}
       {snapshot?.repositoryStatus === 'not-repository' ? <Status>{t('noRepo')}</Status> : null}
       {snapshot?.repositoryStatus === 'directory-missing' ? <Status>{t('missingDir')}</Status> : null}
       {snapshot?.repositoryStatus === 'unavailable' ? <Status>{t('gitUnavailable')}</Status> : null}
       {snapshot?.repositoryStatus === 'available' && files.length === 0 ? <Status>{t('clean')}</Status> : null}
-      {files.map(file => <FileRow key={file.path} file={file} selected={selected === file.path} diff={selected === file.path ? diff : null} diffError={selected === file.path ? diffError : null} diffLoading={selected === file.path && diffLoading} onSelect={() => setSelected(value => value === file.path ? null : file.path)} />)}
+      {routeHint ? <Status>{t('reviewUnavailable')}</Status> : null}
+      {files.map(file => <FileRow key={file.path} file={file} selected={selected === file.path} diff={selected === file.path ? diff : null} diffError={selected === file.path ? diffError : null} diffLoading={selected === file.path && diffLoading} onSelect={() => selectFile(file.path)} />)}
       {snapshotError ? <Status error>{snapshotError}</Status> : null}
     </Card>
   </div>

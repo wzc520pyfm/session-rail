@@ -1,7 +1,7 @@
 {
   "name": "session-rail",
-  "version": "0.1.0",
-  "description": "Session-scoped environment, context, plugins and read-only Git changes in the DSH right sidebar.",
+  "version": "0.1.2",
+  "description": "Session-scoped environment, context, plugins, review navigation and Agent commit requests in the DSH right sidebar.",
   "type": "module",
   "main": "./lib/index.js",
   "exports": {
@@ -30,6 +30,14 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wzc520pyfm/session-rail.git"
+  },
+  "homepage": "https://github.com/wzc520pyfm/session-rail#readme",
+  "bugs": {
+    "url": "https://github.com/wzc520pyfm/session-rail/issues"
   },
   "license": "MIT",
   "engines": {
