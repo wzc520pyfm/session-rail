@@ -90,3 +90,89 @@ export interface TokenUsageProjection {
   cacheReadTokens?: number
   cacheWriteTokens?: number
 }
+
+/** Fine-grained occupancy categories (native meter + optional dsh-context timeline). */
+export type ContextCategoryKey =
+  | 'system'
+  | 'tools'
+  | 'user'
+  | 'inject'
+  | 'skill'
+  | 'assistant'
+  | 'tool'
+  | 'messages'
+  | 'thinking'
+  | 'answers'
+  | 'free'
+  | 'compactionReserve'
+  | 'mcp'
+  | 'memory'
+
+export interface ContextCategoryPart {
+  key: ContextCategoryKey
+  tokens: number
+  color: string
+  raw?: number
+  shareOfUsed?: number
+  shareOfWindow?: number
+}
+
+/** Optional projection published by dsh-context when that plugin is installed. */
+export interface ContextTimelineProjection {
+  model?: string
+  provider?: string
+  contextWindow?: number
+  maxOutputTokens?: number
+  current?: {
+    system?: number
+    tools?: number
+    user?: number
+    inject?: number
+    skill?: number
+    assistant?: number
+    assistantReasoning?: number
+    assistantAnswerTokens?: number
+    assistantCallTokens?: number
+    tool?: number
+    total?: number
+  }
+  last?: { seq?: number; total?: number; prompt?: number }
+  requests?: Array<{ prompt?: number; total?: number }>
+  timing?: {
+    wallMs?: number
+    ttftMs?: number
+    genMs?: number
+    toolsMs?: number
+    speedTokens?: number
+    speedMs?: number
+  }
+}
+
+export interface ContextTimingSummary {
+  wallMs?: number
+  toolsMs?: number
+  genMs?: number
+  ttftMs?: number
+  tokensPerSecond?: number
+}
+
+export interface ContextViewModel {
+  source: 'timeline' | 'meter' | 'none'
+  used?: number
+  window?: number
+  pct?: number
+  estimated: boolean
+  parts: ContextCategoryPart[]
+  categories: ContextCategoryPart[]
+  unavailable: ContextCategoryKey[]
+  timing?: ContextTimingSummary
+  usage?: TokenUsageProjection
+  model?: string
+  provider?: string
+  assistantDetail?: {
+    reasoning?: number
+    answers?: number
+    calls?: number
+  }
+  compactionReserve?: number
+}

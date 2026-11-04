@@ -24,7 +24,7 @@ Restart or reload the DSH Web profile if the plugin loader does not activate the
 dsh plugin --profile web remove session-rail
 ```
 
-The Environment card shows the Session's project folder name, full path, and current Git branch. Context reads DSH's token-meter projections: pressure and capacity when available, estimated system/tool/message categories, and cumulative provider usage as a separate reference. Projection values depend on the active DSH composition; unavailable values remain explicitly unavailable. Plugin names and enabled/runtime status come from DSH's public read-only plugin inventory.
+The Environment card shows the Session's project folder name, full path, and current Git branch. Context reads DSH token-meter projections (`contextPressure`, `contextBreakdown`, `tokenUsage`) and, when the optional `dsh-context` plugin is installed, the fine-grained `contextTimeline` projection. The panel shows a colored category occupancy bar, per-category shares, expandable assistant detail when present, timing/cache rows when the source provides them, and explicitly marks Claude-style categories that DSH does not expose (MCP instructions, Memory, and Skills when only the coarse meter is available). Plugin names and enabled/runtime status come from DSH's public read-only plugin inventory.
 
 Changes lists the Session workspace's changed files, staged/unstaged state, and line counts. `Commit changes` sends the fixed user message `Commit the working tree changes with a sensible message.` to that Session's live Agent. The Agent performs the commit through its normal tools; Session Rail never stages, commits, pushes, or mutates files itself.
 

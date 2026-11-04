@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react'
 import { RailPane } from './pane.tsx'
 import { ensureRailStyle } from './styles.ts'
 import { t } from './i18n.ts'
-import type { ContextBreakdown, ContextPressure, TokenUsageProjection } from '../shared/types.ts'
+import type { ContextBreakdown, ContextPressure, ContextTimelineProjection, TokenUsageProjection } from '../shared/types.ts'
 
 export const inject = ['slots', 'sidebarRightTabs', 'sidebarRight', 'remote', 'remote.pluginInventory']
 const ID = 'session-rail'
@@ -53,6 +53,8 @@ function SessionRailTab(props: SlotProps): React.ReactElement {
   const pressure = props.useProjection?.<ContextPressure>('contextPressure')
   const breakdown = props.useProjection?.<ContextBreakdown>('contextBreakdown')
   const usage = props.useProjection?.<TokenUsageProjection>('tokenUsage')
+  // Optional fine-grained timeline published by dsh-context when installed; absent in stock DSH.
+  const timeline = props.useProjection?.<ContextTimelineProjection>('contextTimeline')
   const inventory = pluginContext?.remote?.pluginInventory
   let tabs: ReadonlyArray<{ kind: string; title: () => string; patterns?: readonly string[] }> = []
   try { tabs = tabsRegistry?.entries?.() ?? tabsRegistry?.getSnapshot?.() ?? [] } catch { /* sidebar registry may be unavailable during startup */ }
@@ -63,7 +65,18 @@ function SessionRailTab(props: SlotProps): React.ReactElement {
     const snapshot = await inventory.list()
     return Array.isArray(snapshot?.entries) ? snapshot.entries : []
   }, [inventory])
-  return <RailPane key={sessionId} sessionId={sessionId} cwd={projectedCwd || undefined} pressure={pressure} breakdown={breakdown} usage={usage} loadPlugins={inventory?.list ? loadPlugins : undefined} activeTabs={tabs.map(tab => ({ kind: tab.kind, title: safeTitle(tab.title) }))} openTab={openTab ? kind => openTab.call(pluginContext?.sidebarRight, kind) : undefined} />
+  return <RailPane
+    key={sessionId}
+    sessionId={sessionId}
+    cwd={projectedCwd || undefined}
+    pressure={pressure}
+    breakdown={breakdown}
+    usage={usage}
+    timeline={timeline}
+    loadPlugins={inventory?.list ? loadPlugins : undefined}
+    activeTabs={tabs.map(tab => ({ kind: tab.kind, title: safeTitle(tab.title) }))}
+    openTab={openTab ? kind => openTab.call(pluginContext?.sidebarRight, kind) : undefined}
+  />
 }
 
 function safeTitle(title: () => string): string { try { return String(title()) } catch { return '' } }

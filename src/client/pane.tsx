@@ -1,15 +1,16 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { getDiff, getSnapshot, requestCommit, RailApiError } from './api.ts'
+import { buildContextView, formatDuration, formatTokens, hasProviderUsage } from './context-model.ts'
 import { t } from './i18n.ts'
 import { ensureRailStyle } from './styles.ts'
-import type { ChangedFile, ContextBreakdown, ContextPressure, FileDiff, SessionSnapshot, TokenUsageProjection, UnifiedDiffLine } from '../shared/types.ts'
+import type { ChangedFile, ContextBreakdown, ContextCategoryKey, ContextCategoryPart, ContextPressure, ContextTimelineProjection, ContextViewModel, FileDiff, SessionSnapshot, TokenUsageProjection, UnifiedDiffLine } from '../shared/types.ts'
 
 interface PluginItem { moduleName?: string; entryId?: string; fiberPhase?: string | null; enabled?: boolean }
 interface TabChoice { kind: string; title: string }
-interface Props { sessionId: string; cwd?: string; pressure?: ContextPressure; breakdown?: ContextBreakdown; usage?: TokenUsageProjection; loadPlugins?: () => Promise<PluginItem[]>; activeTabs?: TabChoice[]; openTab?: (kind: string) => unknown }
+interface Props { sessionId: string; cwd?: string; pressure?: ContextPressure; breakdown?: ContextBreakdown; usage?: TokenUsageProjection; timeline?: ContextTimelineProjection; loadPlugins?: () => Promise<PluginItem[]>; activeTabs?: TabChoice[]; openTab?: (kind: string) => unknown }
 
 export function RailPane(props: Props): React.ReactElement {
-  const { sessionId, cwd, pressure, breakdown, usage, loadPlugins, activeTabs = [], openTab } = props
+  const { sessionId, cwd, pressure, breakdown, usage, timeline, loadPlugins, activeTabs = [], openTab } = props
   const [snapshot, setSnapshot] = useState<SessionSnapshot | null>(null)
   const [snapshotError, setSnapshotError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -56,11 +57,10 @@ export function RailPane(props: Props): React.ReactElement {
     return () => { active = false; abort.abort() }
   }, [sessionId, selected])
 
-  const ratio = useMemo(() => {
-    const current = finite(pressure?.pressureTokens) ?? finite(pressure?.projectedTokens)
-    const capacity = finite(pressure?.contextWindow)
-    return current !== undefined && capacity && capacity > 0 ? { current, capacity, pct: Math.max(0, Math.min(100, current / capacity * 100)), estimated: finite(pressure?.pressureTokens) === undefined } : null
-  }, [pressure])
+  const context = useMemo(
+    () => buildContextView({ pressure, breakdown, usage, timeline }),
+    [pressure, breakdown, usage, timeline],
+  )
   const files = snapshot?.changedFiles ?? []
   const displayCwd = cwd ?? snapshot?.cwd
   const totals = files.reduce((sum, file) => ({ add: sum.add + file.additions, del: sum.del + file.deletions }), { add: 0, del: 0 })
@@ -95,9 +95,7 @@ export function RailPane(props: Props): React.ReactElement {
       {snapshot?.repositoryStatus === 'unavailable' ? <Status>{t('gitUnavailable')}</Status> : null}
     </Card>
     <Card title={t('context')} collapsed={!!collapsed.context} onToggle={() => toggle('context')}>
-      {ratio ? <><div className="dsr-row"><span>{ratio.estimated ? `${t('estimated')} · ` : ''}{t('current')}</span><span className="dsr-stats">{ratio.pct.toFixed(0)}% · {format(ratio.current)} / {format(ratio.capacity)}</span></div><div className="dsr-meter" role="meter" aria-valuemin={0} aria-valuemax={ratio.capacity} aria-valuenow={ratio.current}><i style={{ width: `${ratio.pct}%` }} /></div></> : <Status>{t('contextUnavailable')}</Status>}
-      {breakdown ? <div className="dsr-breakdown">{([['systemTokens', 'system'], ['toolsTokens', 'tools'], ['messageTokens', 'messages']] as const).map(([field, label]) => finite(breakdown[field]) !== undefined ? <div className="dsr-row dsr-muted" key={field}><span>{t(label)} <span className="dsr-chip">{t('estimated')}</span></span><span className="dsr-stats">{format(breakdown[field])} {t('tokens')}</span></div> : null)}</div> : null}
-      {usage && hasUsage(usage) ? <div className="dsr-row dsr-muted" title={t('providerUsage')}><span>{t('providerUsage')}</span><span className="dsr-stats">↑{format(sum(usage.uncachedInputTokens, usage.cacheReadTokens, usage.cacheWriteTokens))} ↓{format(usage.outputTokens)}</span></div> : null}
+      <ContextPanel view={context} />
     </Card>
     <Card title={t('plugins')} collapsed={!!collapsed.plugins} onToggle={() => toggle('plugins')}>
       {pluginError ? <Status>{t('pluginsUnavailable')}</Status> : null}
@@ -132,8 +130,114 @@ function FileRow({ file, selected, diff, diffError, diffLoading, onSelect }: { f
     {selected ? <div className="dsr-diff" role="region" aria-label={`${t('viewDiff')}: ${file.path}`}>{diffLoading ? t('loading') : diffError ? diffError : diff?.binary || file.binary ? t('binary') : diff?.lines?.map((line, i) => <DiffLine key={i} line={line} />) ?? t('diffUnavailable')}</div> : null}</div>
 }
 function DiffLine({ line }: { line: UnifiedDiffLine }) { return <div className={line.kind === 'addition' ? 'dsr-line-add' : line.kind === 'deletion' ? 'dsr-line-del' : undefined}>{line.text || ' '}</div> }
+
+function ContextPanel({ view }: { view: ContextViewModel }) {
+  const [usageOpen, setUsageOpen] = useState(false)
+  if (view.source === 'none' || (view.used === undefined && view.categories.length === 0)) {
+    return <Status>{t('contextUnavailable')}</Status>
+  }
+  const used = view.used ?? 0
+  const window = view.window
+  const pct = view.pct
+  const meterMax = window ?? Math.max(used, 1)
+  const segments = view.parts.filter(part => part.key !== 'free' || (window !== undefined && part.tokens > 0))
+  return <>
+    <div className="dsr-row">
+      <span>{view.estimated ? `${t('estimated')} · ` : ''}{t('current')}</span>
+      <span className="dsr-stats">{pct !== undefined ? `${pct.toFixed(pct < 10 ? 1 : 0)}% · ` : ''}{formatTokens(used)}{window !== undefined ? ` / ${formatTokens(window)}` : ''}</span>
+    </div>
+    <div className="dsr-meter dsr-meter-segments" role="meter" aria-valuemin={0} aria-valuemax={meterMax} aria-valuenow={used} aria-label={t('current')}>
+      {segments.map(part => {
+        const width = meterMax > 0 ? Math.max(part.tokens > 0 ? 0.4 : 0, part.tokens / meterMax * 100) : 0
+        return width > 0 ? <i key={part.key} title={`${categoryLabel(part.key)} · ${formatTokens(part.tokens)}`} style={{ width: `${width}%`, background: part.color }} /> : null
+      })}
+    </div>
+    <div className="dsr-row dsr-muted"><span className="dsr-chip">{view.source === 'timeline' ? t('sourceTimeline') : t('sourceMeter')}</span>{view.model ? <span className="dsr-chip" title={view.provider}>{view.model}</span> : null}</div>
+    <div className="dsr-breakdown">
+      {view.categories.map(part => <CategoryRow key={part.key} part={part} detail={part.key === 'assistant' ? view.assistantDetail : undefined} />)}
+      {view.compactionReserve !== undefined ? <div className="dsr-row dsr-muted"><span><span className="dsr-swatch" style={{ background: 'var(--color-slate-400, #94a3b8)' }} />{t('compactionReserve')}</span><span className="dsr-stats">{formatTokens(view.compactionReserve)} {t('tokens')}</span></div> : null}
+      {view.unavailable.map(key => <div className="dsr-row dsr-muted" key={`missing-${key}`}><span>{categoryLabel(key)}</span><span className="dsr-stats dsr-chip">{t('unavailable')}</span></div>)}
+    </div>
+    {view.timing ? <TimingBlock timing={view.timing} /> : null}
+    {hasProviderUsage(view.usage) ? <UsageBlock usage={view.usage!} expanded={usageOpen} onToggle={() => setUsageOpen(value => !value)} /> : null}
+  </>
+}
+
+function CategoryRow({ part, detail }: { part: ContextCategoryPart; detail?: ContextViewModel['assistantDetail'] }) {
+  const [open, setOpen] = useState(false)
+  const canExpand = part.key === 'assistant' && detail && (detail.reasoning || detail.answers || detail.calls)
+  return <div className="dsr-cat">
+    <div className="dsr-row dsr-muted">
+      <button type="button" className="dsr-cat-toggle" aria-expanded={canExpand ? open : undefined} disabled={!canExpand} onClick={() => canExpand && setOpen(value => !value)}>
+        <span className="dsr-swatch" style={{ background: part.color }} aria-hidden="true" />
+        <span>{categoryLabel(part.key)}{part.key !== 'free' ? <span className="dsr-chip">{t('estimated')}</span> : null}</span>
+        {canExpand ? <span className="dsr-chip" aria-hidden="true">{open ? '⌃' : '⌄'}</span> : null}
+      </button>
+      <span className="dsr-stats">
+        {formatTokens(part.tokens)} {t('tokens')}
+        {part.shareOfUsed !== undefined ? <span className="dsr-chip"> · {part.shareOfUsed.toFixed(0)}% {t('ofUsed')}</span> : null}
+        {part.shareOfWindow !== undefined ? <span className="dsr-chip"> · {part.shareOfWindow.toFixed(0)}% {t('ofWindow')}</span> : null}
+      </span>
+    </div>
+    {open && detail ? <div className="dsr-subrows">
+      {detail.reasoning !== undefined ? <div className="dsr-row dsr-muted"><span>{t('thinking')}</span><span className="dsr-stats">{formatTokens(detail.reasoning)}</span></div> : null}
+      {detail.answers !== undefined ? <div className="dsr-row dsr-muted"><span>{t('answers')}</span><span className="dsr-stats">{formatTokens(detail.answers)}</span></div> : null}
+      {detail.calls !== undefined ? <div className="dsr-row dsr-muted"><span>{t('tool')}</span><span className="dsr-stats">{formatTokens(detail.calls)}</span></div> : null}
+    </div> : null}
+  </div>
+}
+
+function TimingBlock({ timing }: { timing: NonNullable<ContextViewModel['timing']> }) {
+  return <div className="dsr-timing">
+    <div className="dsr-row"><span>{t('timing')}</span></div>
+    {timing.wallMs !== undefined ? <div className="dsr-row dsr-muted"><span>{t('activeDuration')}</span><span className="dsr-stats">{formatDuration(timing.wallMs)}</span></div> : null}
+    {timing.genMs !== undefined ? <div className="dsr-row dsr-muted"><span>{t('modelWait')}</span><span className="dsr-stats">{formatDuration(timing.genMs)}</span></div> : null}
+    {timing.toolsMs !== undefined ? <div className="dsr-row dsr-muted"><span>{t('toolExec')}</span><span className="dsr-stats">{formatDuration(timing.toolsMs)}</span></div> : null}
+    {timing.ttftMs !== undefined ? <div className="dsr-row dsr-muted"><span>{t('ttft')}</span><span className="dsr-stats">{formatDuration(timing.ttftMs)}</span></div> : null}
+    {timing.tokensPerSecond !== undefined ? <div className="dsr-row dsr-muted"><span>{t('outputSpeed')}</span><span className="dsr-stats">{timing.tokensPerSecond.toFixed(1)} {t('tokensPerSec')}</span></div> : null}
+  </div>
+}
+
+function UsageBlock({ usage, expanded, onToggle }: { usage: TokenUsageProjection; expanded: boolean; onToggle: () => void }) {
+  const input = sum(usage.uncachedInputTokens, usage.cacheReadTokens, usage.cacheWriteTokens)
+  return <div className="dsr-usage">
+    <div className="dsr-row dsr-muted">
+      <button type="button" className="dsr-cat-toggle" aria-expanded={expanded} onClick={onToggle} title={t('providerUsage')}>
+        <span>{t('providerUsage')}</span>
+        <span className="dsr-chip" aria-hidden="true">{expanded ? '⌃' : '⌄'}</span>
+      </button>
+      <span className="dsr-stats">↑{formatTokens(input)} ↓{formatTokens(usage.outputTokens)}</span>
+    </div>
+    {expanded ? <div className="dsr-subrows">
+      {finite(usage.uncachedInputTokens) !== undefined ? <div className="dsr-row dsr-muted"><span>{t('uncachedInput')}</span><span className="dsr-stats">{formatTokens(usage.uncachedInputTokens)}</span></div> : null}
+      {finite(usage.cacheReadTokens) !== undefined ? <div className="dsr-row dsr-muted"><span>{t('cacheRead')}</span><span className="dsr-stats">{formatTokens(usage.cacheReadTokens)}</span></div> : null}
+      {finite(usage.cacheWriteTokens) !== undefined ? <div className="dsr-row dsr-muted"><span>{t('cacheWrite')}</span><span className="dsr-stats">{formatTokens(usage.cacheWriteTokens)}</span></div> : null}
+      {finite(usage.outputTokens) !== undefined ? <div className="dsr-row dsr-muted"><span>{t('output')}</span><span className="dsr-stats">{formatTokens(usage.outputTokens)}</span></div> : null}
+    </div> : null}
+  </div>
+}
+
+function categoryLabel(key: ContextCategoryKey): string {
+  switch (key) {
+    case 'system': return t('system')
+    case 'tools': return t('tools')
+    case 'user': return t('user')
+    case 'inject': return t('inject')
+    case 'skill': return t('skill')
+    case 'assistant': return t('assistant')
+    case 'tool': return t('tool')
+    case 'messages': return t('messages')
+    case 'thinking': return t('thinking')
+    case 'answers': return t('answers')
+    case 'free': return t('free')
+    case 'compactionReserve': return t('compactionReserve')
+    case 'mcp': return t('mcp')
+    case 'memory': return t('memory')
+    default: return key
+  }
+}
+
 function finite(value: unknown): number | undefined { return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : undefined }
-function format(value: unknown): string { const number = finite(value); return number === undefined ? '—' : Intl.NumberFormat().format(number) }
+function format(value: unknown): string { return formatTokens(value) }
 function sum(...values: unknown[]): number | undefined { const valid = values.map(finite).filter((x): x is number => x !== undefined); return valid.length ? valid.reduce((a, b) => a + b, 0) : undefined }
-function hasUsage(value: TokenUsageProjection): boolean { return sum(value.uncachedInputTokens, value.cacheReadTokens, value.cacheWriteTokens, value.outputTokens) !== undefined }
 function basename(path: string): string { return path.replace(/[\\/]+$/, '').split(/[\\/]/).filter(Boolean).at(-1) ?? path }
