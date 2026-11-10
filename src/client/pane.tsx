@@ -1,16 +1,34 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { getDiff, getSnapshot, requestCommit, RailApiError } from './api.ts'
+import { getSnapshot, requestCommit } from './api.ts'
+import { changesReviewAddress, fileAddressFor } from './addresses.ts'
 import { buildContextView, formatDuration, formatTokens, hasProviderUsage } from './context-model.ts'
 import { t } from './i18n.ts'
+import { findLatestChangeMatch, loadChangesSummary, subscribeOutputTurns, type OutputTurnRecord, type SummaryState, type UiConversationLike } from './output-model.ts'
 import { ensureRailStyle } from './styles.ts'
-import type { ChangedFile, ContextBreakdown, ContextCategoryKey, ContextCategoryPart, ContextPressure, ContextTimelineProjection, ContextViewModel, FileDiff, SessionSnapshot, TokenUsageProjection, UnifiedDiffLine } from '../shared/types.ts'
+import type { ChangedFile, ContextBreakdown, ContextCategoryKey, ContextCategoryPart, ContextPressure, ContextTimelineProjection, ContextViewModel, SessionSnapshot, TokenUsageProjection } from '../shared/types.ts'
 
 interface PluginItem { moduleName?: string; entryId?: string; fiberPhase?: string | null; enabled?: boolean }
 interface TabChoice { kind: string; title: string }
-interface Props { sessionId: string; cwd?: string; pressure?: ContextPressure; breakdown?: ContextBreakdown; usage?: TokenUsageProjection; timeline?: ContextTimelineProjection; loadPlugins?: () => Promise<PluginItem[]>; activeTabs?: TabChoice[]; openTab?: (kind: string) => unknown }
+interface OpenResourceOptions { params?: { index?: number } }
+interface Props {
+  sessionId: string
+  cwd?: string
+  pressure?: ContextPressure
+  breakdown?: ContextBreakdown
+  usage?: TokenUsageProjection
+  timeline?: ContextTimelineProjection
+  loadPlugins?: () => Promise<PluginItem[]>
+  activeTabs?: TabChoice[]
+  openTab?: (kind: string) => unknown
+  openResource?: (address: string, options?: OpenResourceOptions) => unknown
+  uiConversation?: UiConversationLike
+}
+
+const REVIEW_KIND_STORAGE = 'session-rail:selected-review-kind'
+const LEGACY_DEFAULT_KIND = 'codex-review'
 
 export function RailPane(props: Props): React.ReactElement {
-  const { sessionId, cwd, pressure, breakdown, usage, timeline, loadPlugins, activeTabs = [], openTab } = props
+  const { sessionId, cwd, pressure, breakdown, usage, timeline, loadPlugins, activeTabs = [], openTab, openResource, uiConversation } = props
   const [snapshot, setSnapshot] = useState<SessionSnapshot | null>(null)
   const [snapshotError, setSnapshotError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -18,22 +36,26 @@ export function RailPane(props: Props): React.ReactElement {
   const [plugins, setPlugins] = useState<PluginItem[] | null>(null)
   const [pluginError, setPluginError] = useState(false)
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
-  const [selected, setSelected] = useState<string | null>(null)
-  const [diff, setDiff] = useState<FileDiff | null>(null)
-  const [diffError, setDiffError] = useState<string | null>(null)
-  const [diffLoading, setDiffLoading] = useState(false)
-  const [chosenKind, setChosenKind] = useState('codex-review')
+  const [chosenKind, setChosenKind] = useState('')
   const [commitState, setCommitState] = useState<'idle' | 'sending' | 'queued' | 'error'>('idle')
   const commitInFlight = useRef(false)
-  const [routeHint, setRouteHint] = useState(false)
-  const storageKey = 'session-rail:selected-review-kind'
-  useEffect(() => { try { const saved = localStorage.getItem(storageKey); setChosenKind(saved || 'codex-review') } catch { setChosenKind('codex-review') } }, [])
+  const [routeHint, setRouteHint] = useState<string | null>(null)
+  const [outputTurns, setOutputTurns] = useState<readonly OutputTurnRecord[] | 'unavailable'>([])
+  const [summaries, setSummaries] = useState<Record<string, SummaryState>>({})
+  const [outputRevision, setOutputRevision] = useState(0)
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(REVIEW_KIND_STORAGE) ?? ''
+      setChosenKind(saved === LEGACY_DEFAULT_KIND ? '' : saved)
+      if (saved === LEGACY_DEFAULT_KIND) localStorage.removeItem(REVIEW_KIND_STORAGE)
+    } catch { setChosenKind('') }
+  }, [])
   useEffect(() => { ensureRailStyle() }, [])
 
   useEffect(() => {
     if (!sessionId) { setSnapshot(null); setLoading(false); return }
     const abort = new AbortController(); let active = true
-    setLoading(true); setSnapshotError(null); setSnapshot(null); setSelected(null); setDiff(null)
+    setLoading(true); setSnapshotError(null); setSnapshot(null)
     getSnapshot(sessionId, abort.signal).then(value => { if (active) setSnapshot(value) }).catch(error => { if (active && !abort.signal.aborted) setSnapshotError(error instanceof Error ? error.message : String(error)) }).finally(() => { if (active) setLoading(false) })
     return () => { active = false; abort.abort() }
   }, [sessionId, revision])
@@ -46,16 +68,34 @@ export function RailPane(props: Props): React.ReactElement {
   }, [loadPlugins])
 
   useEffect(() => {
-    if (!sessionId || !selected) return
-    const abort = new AbortController(); let active = true
-    setDiffLoading(true); setDiffError(null); setDiff(null)
-    getDiff(sessionId, selected, abort.signal).then(value => { if (active) setDiff(value) }).catch(error => {
-      if (!active || abort.signal.aborted) return
-      const typed = error instanceof RailApiError && error.code === 'diff_too_large' ? t('diffTooLarge') : (error instanceof Error ? error.message : t('diffUnavailable'))
-      setDiffError(typed)
-    }).finally(() => { if (active) setDiffLoading(false) })
-    return () => { active = false; abort.abort() }
-  }, [sessionId, selected])
+    setSummaries({})
+    return subscribeOutputTurns(uiConversation, sessionId, value => {
+      setOutputTurns(value)
+    })
+  }, [uiConversation, sessionId])
+
+  useEffect(() => {
+    if (!sessionId || outputTurns === 'unavailable') return
+    const abort = new AbortController()
+    const needed = outputTurns.filter(turn => turn.seq !== undefined)
+    for (const turn of needed) {
+      const seq = turn.seq!
+      const key = summaryKey(sessionId, seq)
+      setSummaries(current => current[key] === undefined ? { ...current, [key]: 'loading' } : current)
+    }
+    void Promise.all(needed.map(async turn => {
+      const seq = turn.seq!
+      const key = summaryKey(sessionId, seq)
+      const existing = summaries[key]
+      if (existing && existing !== 'loading' && existing !== 'error') return
+      if (existing === 'error' && outputRevision === 0) return
+      const value = await loadChangesSummary(sessionId, seq, abort.signal)
+      setSummaries(current => (current[key] === value ? current : { ...current, [key]: value }))
+    })).catch(() => undefined)
+    return () => abort.abort()
+    // summaries is read only to skip completed entries; outputRevision retriggers retryable errors.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, outputTurns, outputRevision])
 
   const context = useMemo(
     () => buildContextView({ pressure, breakdown, usage, timeline }),
@@ -67,18 +107,73 @@ export function RailPane(props: Props): React.ReactElement {
   const normalizedTarget = chosenKind.trim()
   const targetExists = activeTabs.some(tab => tab.kind === normalizedTarget)
   const commitDisabledReason = !sessionId ? t('commitNoSession') : loading ? t('loading') : files.length === 0 ? t('commitNoFiles') : snapshot?.followupAvailable !== true ? t('commitNoAgent') : null
+  const announcedTurns = outputTurns === 'unavailable' ? [] : outputTurns
 
-  function selectFile(path: string) {
-    setRouteHint(false)
-    if (selected === path) { setSelected(null); return }
+  function persistKind(kind: string) {
+    setChosenKind(kind)
+    try {
+      if (kind) localStorage.setItem(REVIEW_KIND_STORAGE, kind)
+      else localStorage.removeItem(REVIEW_KIND_STORAGE)
+    } catch { /* storage may be unavailable */ }
+  }
+
+  function tryOpenResource(address: string, options?: OpenResourceOptions): boolean {
+    if (!openResource) return false
+    try {
+      openResource(address, options)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  async function ensureSummaries(): Promise<Array<OutputTurnRecord & { summary?: SummaryState }>> {
+    if (!sessionId || outputTurns === 'unavailable') return []
+    const resolved = await Promise.all(announcedTurns.map(async turn => {
+      if (turn.seq === undefined) return { ...turn, summary: undefined as SummaryState | undefined }
+      const key = summaryKey(sessionId, turn.seq)
+      const standing = summaries[key]
+      if (standing && standing !== 'loading') return { ...turn, summary: standing }
+      const value = await loadChangesSummary(sessionId, turn.seq)
+      setSummaries(current => (current[key] === value ? current : { ...current, [key]: value }))
+      return { ...turn, summary: value }
+    }))
+    return resolved
+  }
+
+  async function openOfficialReview(path: string) {
+    const loaded = await ensureSummaries()
+    const match = findLatestChangeMatch(path, loaded)
+    if (match) {
+      if (tryOpenResource(changesReviewAddress({ sessionId, seq: match.seq, turn: match.turn }), { params: { index: match.index } })) return
+      setRouteHint(t('openFailed'))
+      return
+    }
+    if (tryOpenResource(fileAddressFor(sessionId, displayCwd, path))) return
+    setRouteHint(t('openFailed'))
+  }
+
+  function selectWorkingTreeFile(path: string) {
+    setRouteHint(null)
     if (normalizedTarget && openTab) {
       try {
         const result = openTab(normalizedTarget)
-        if (result !== false) { setSelected(null); return }
-      } catch { /* fall through to the inline diff */ }
+        if (result !== false) return
+      } catch { /* fall through to the official review tab */ }
     }
-    setSelected(path)
-    setRouteHint(true)
+    void openOfficialReview(path)
+  }
+
+  function selectChangedOutput(turn: number, seq: number, index: number) {
+    setRouteHint(null)
+    if (tryOpenResource(changesReviewAddress({ sessionId, seq, turn }), { params: { index } })) return
+    setRouteHint(t('openFailed'))
+  }
+
+  function selectDeliveredOutput(path: string) {
+    setRouteHint(null)
+    if (tryOpenResource(fileAddressFor(sessionId, displayCwd, path))) return
+    setRouteHint(t('openFailed'))
   }
 
   function toggle(key: string) { setCollapsed(value => ({ ...value, [key]: !value[key] })) }
@@ -103,8 +198,11 @@ export function RailPane(props: Props): React.ReactElement {
       {!pluginError && plugins?.length === 0 ? <Status>{t('noPlugins')}</Status> : null}
       {plugins?.map((plugin, index) => <div className="dsr-plugin" key={plugin.entryId ?? `${plugin.moduleName ?? 'plugin'}-${index}`}><span title={plugin.entryId}>{plugin.moduleName ?? plugin.entryId ?? 'Plugin'}</span><span className="dsr-stats">{plugin.enabled === false ? t('disabled') : plugin.fiberPhase === 'failed' ? t('error') : plugin.fiberPhase === 'loading' || plugin.fiberPhase === 'unloading' ? t('loading') : t('enabled')}</span></div>)}
     </Card>
+    <Card title={t('outputFiles')} collapsed={!!collapsed.output} onToggle={() => toggle('output')} action={<button className="dsr-refresh" type="button" aria-label={t('refresh')} title={t('refresh')} onClick={() => setOutputRevision(value => value + 1)}>↻</button>}>
+      <OutputFilesPanel sessionId={sessionId} turns={outputTurns} summaries={summaries} openError={routeHint} onOpenChanged={selectChangedOutput} onOpenDelivered={selectDeliveredOutput} />
+    </Card>
     <Card title={t('changes')} collapsed={!!collapsed.changes} onToggle={() => toggle('changes')} action={<button className="dsr-refresh" type="button" aria-label={t('refresh')} title={t('refresh')} onClick={() => setRevision(value => value + 1)}>↻</button>}>
-      <div className="dsr-actions"><label>{t('reviewTarget')} <input className="dsr-target" list="dsr-review-targets" value={chosenKind} spellCheck={false} autoCapitalize="none" onChange={event => { const kind = event.target.value; setChosenKind(kind); try { localStorage.setItem(storageKey, kind) } catch { /* storage may be unavailable */ } }} onBlur={() => { const kind = chosenKind.trim(); if (kind !== chosenKind) { setChosenKind(kind); try { localStorage.setItem(storageKey, kind) } catch { /* storage may be unavailable */ } } }} placeholder="codex-review" aria-label={t('reviewTarget')} /><span className="dsr-chip" title={targetExists ? t('enabled') : t('unavailable')}>{targetExists ? t('enabled') : t('unavailable')}</span></label><datalist id="dsr-review-targets">{activeTabs.map(tab => <option key={tab.kind} value={tab.kind}>{tab.title}</option>)}</datalist>
+      <div className="dsr-actions"><label>{t('reviewTarget')} <input className="dsr-target" list="dsr-review-targets" value={chosenKind} spellCheck={false} autoCapitalize="none" onChange={event => persistKind(event.target.value)} onBlur={() => { const kind = chosenKind.trim(); if (kind !== chosenKind) persistKind(kind) }} placeholder={t('reviewOptional')} aria-label={t('reviewTarget')} />{normalizedTarget ? <span className="dsr-chip" title={targetExists ? t('enabled') : t('unavailable')}>{targetExists ? t('enabled') : t('unavailable')}</span> : null}</label><datalist id="dsr-review-targets">{activeTabs.map(tab => <option key={tab.kind} value={tab.kind}>{tab.title}</option>)}</datalist>
       <button type="button" className="dsr-commit" disabled={!!commitDisabledReason || commitState === 'sending'} title={commitDisabledReason ?? undefined} onClick={async () => { if (commitInFlight.current || commitDisabledReason) return; commitInFlight.current = true; setCommitState('sending'); try { await requestCommit(sessionId); setCommitState('queued') } catch { setCommitState('error') } finally { commitInFlight.current = false } }}>{commitState === 'sending' ? t('commitSending') : t('commitChanges')}</button></div>
       {commitDisabledReason ? <Status>{commitDisabledReason}</Status> : null}{commitState === 'error' ? <Status error>{t('commitError')}</Status> : null}{commitState === 'queued' ? <Status>{t('commitQueued')}</Status> : null}
       <div className="dsr-row"><span>{snapshot ? t('files')(files.length) : t('loading')}</span><span className="dsr-stats"><span className="dsr-add">+{totals.add}</span> <span className="dsr-del">−{totals.del}</span></span></div>
@@ -113,10 +211,85 @@ export function RailPane(props: Props): React.ReactElement {
       {snapshot?.repositoryStatus === 'directory-missing' ? <Status>{t('missingDir')}</Status> : null}
       {snapshot?.repositoryStatus === 'unavailable' ? <Status>{t('gitUnavailable')}</Status> : null}
       {snapshot?.repositoryStatus === 'available' && files.length === 0 ? <Status>{t('clean')}</Status> : null}
-      {routeHint ? <Status>{t('reviewUnavailable')}</Status> : null}
-      {files.map(file => <FileRow key={file.path} file={file} selected={selected === file.path} diff={selected === file.path ? diff : null} diffError={selected === file.path ? diffError : null} diffLoading={selected === file.path && diffLoading} onSelect={() => selectFile(file.path)} />)}
+      {routeHint ? <Status error={routeHint === t('openFailed')}>{routeHint}</Status> : null}
+      {files.map(file => <FileRow key={file.path} file={file} onSelect={() => selectWorkingTreeFile(file.path)} />)}
       {snapshotError ? <Status error>{snapshotError}</Status> : null}
     </Card>
+  </div>
+}
+
+function OutputFilesPanel({ sessionId, turns, summaries, openError, onOpenChanged, onOpenDelivered }: {
+  sessionId: string
+  turns: readonly OutputTurnRecord[] | 'unavailable'
+  summaries: Record<string, SummaryState>
+  openError: string | null
+  onOpenChanged: (turn: number, seq: number, index: number) => void
+  onOpenDelivered: (path: string) => void
+}) {
+  if (!sessionId) return <Status>{t('noSession')}</Status>
+  if (turns === 'unavailable') return <Status>{t('outputUnavailable')}</Status>
+  if (turns.length === 0) return <Status>{t('outputEmpty')}</Status>
+  const states = turns.map(turn => ({ turn, summary: turn.seq === undefined ? undefined : summaries[summaryKey(sessionId, turn.seq)] }))
+  const pending = states.some(item => item.turn.seq !== undefined && (item.summary === undefined || item.summary === 'loading'))
+  const anyMissing = states.some(item => item.summary === 'missing')
+  const anyError = states.some(item => item.summary === 'error')
+  const anyVisible = states.some(item => {
+    if (item.turn.presented.length > 0) return true
+    return item.summary !== undefined && typeof item.summary !== 'string' && (item.summary.files.length > 0 || item.summary.total > 0)
+  })
+  const onlyMissing = !anyVisible && !pending && anyMissing && states.every(item => item.turn.presented.length === 0 && (item.turn.seq === undefined || item.summary === 'missing' || item.summary === 'error' || item.summary === undefined))
+  if (onlyMissing) return <Status>{t('outputSummaryUnavailable')}</Status>
+  if (!anyVisible && !pending && !anyError && !anyMissing) return <Status>{t('outputNoChanges')}</Status>
+  return <>
+    {pending && !anyVisible ? <Status>{t('loading')}</Status> : null}
+    {openError ? <Status error={openError === t('openFailed')}>{openError}</Status> : null}
+    {states.map(({ turn, summary }) => <OutputTurn key={turn.turn} record={turn} summary={summary} onOpenChanged={onOpenChanged} onOpenDelivered={onOpenDelivered} />)}
+  </>
+}
+
+function OutputTurn({ record, summary, onOpenChanged, onOpenDelivered }: {
+  record: OutputTurnRecord
+  summary: SummaryState | undefined
+  onOpenChanged: (turn: number, seq: number, index: number) => void
+  onOpenDelivered: (path: string) => void
+}) {
+  const files = summary && typeof summary !== 'string' ? summary.files : []
+  const presented = record.presented
+  const changedPaths = new Set(files.map(file => normalizeForMark(file.path)))
+  const deliveredOnly = presented.filter(file => !changedPaths.has(normalizeForMark(file.path)))
+  const deliveredPaths = new Set(presented.map(file => normalizeForMark(file.path)))
+  return <div className="dsr-turn">
+    <div className="dsr-row dsr-turn-heading">
+      <span>{t('turn')(record.turn)}</span>
+      {summary && typeof summary !== 'string' ? <span className="dsr-stats"><span className="dsr-add">+{summary.added}</span> <span className="dsr-del">−{summary.deleted}</span></span> : null}
+    </div>
+    {record.seq !== undefined && (summary === undefined || summary === 'loading') ? <Status>{t('loading')}</Status> : null}
+    {summary === 'missing' ? <Status>{t('outputSummaryUnavailable')}</Status> : null}
+    {summary === 'error' ? <Status error>{t('error')}</Status> : null}
+    {summary && typeof summary !== 'string' && files.length === 0 && presented.length === 0 ? <Status>{t('outputTurnEmpty')}</Status> : null}
+    {files.map((file, index) => (
+      <div className="dsr-file" key={`change:${file.path}:${index}`}>
+        <div className="dsr-row">
+          <button type="button" onClick={() => record.seq !== undefined && onOpenChanged(record.turn, record.seq, index)} title={file.path}>
+            {file.display || file.path}
+            {deliveredPaths.has(normalizeForMark(file.path)) ? <span className="dsr-chip">{t('delivered')}</span> : null}
+            {file.binary ? <span className="dsr-chip">{t('binary')}</span> : null}
+            {file.oversized ? <span className="dsr-chip">{t('diffTooLarge')}</span> : null}
+          </button>
+          <span className="dsr-stats"><span className="dsr-add">+{file.added}</span> <span className="dsr-del">−{file.deleted}</span></span>
+        </div>
+      </div>
+    ))}
+    {deliveredOnly.map(file => (
+      <div className="dsr-file" key={`present:${file.seq}:${file.index}`}>
+        <div className="dsr-row">
+          <button type="button" onClick={() => onOpenDelivered(file.path)} title={file.path}>
+            {file.path}
+            <span className="dsr-chip">{t('delivered')}</span>
+          </button>
+        </div>
+      </div>
+    ))}
   </div>
 }
 
@@ -124,12 +297,13 @@ function Card({ title, collapsed, onToggle, action, children }: { title: string;
   return <section className="dsr-card"><div className="dsr-heading"><button className="dsr-title" type="button" aria-expanded={!collapsed} onClick={onToggle}>{title}<span aria-hidden="true">{collapsed ? '⌄' : '⌃'}</span></button>{action}</div>{!collapsed ? <div className="dsr-content">{children}</div> : null}</section>
 }
 function Status({ children, error = false }: { children: React.ReactNode; error?: boolean }) { return <div className={`dsr-row dsr-muted${error ? ' dsr-error' : ''}`}>{children}</div> }
-function FileRow({ file, selected, diff, diffError, diffLoading, onSelect }: { file: ChangedFile; selected: boolean; diff: FileDiff | null; diffError: string | null; diffLoading: boolean; onSelect: () => void }) {
+function FileRow({ file, onSelect }: { file: ChangedFile; onSelect: () => void }) {
   const label = file.status === 'untracked' ? t('untracked') : file.status === 'added' ? t('added') : file.status === 'deleted' ? t('deleted') : file.status === 'renamed' ? t('renamed') : file.status === 'copied' ? t('copied') : file.status === 'conflicted' ? t('conflicted') : t('modified')
-  return <div className="dsr-file"><div className="dsr-row"><button type="button" aria-expanded={selected} onClick={onSelect} title={file.path}>{file.path}<span className="dsr-chip">{label}</span>{file.binary ? <span className="dsr-chip">{t('binary')}</span> : null}{file.staged ? <span className="dsr-chip">{t('staged')}</span> : null}{file.unstaged ? <span className="dsr-chip">{t('unstaged')}</span> : null}</button><span className="dsr-stats"><span className="dsr-add">+{file.additions}</span> <span className="dsr-del">−{file.deletions}</span></span></div>
-    {selected ? <div className="dsr-diff" role="region" aria-label={`${t('viewDiff')}: ${file.path}`}>{diffLoading ? t('loading') : diffError ? diffError : diff?.binary || file.binary ? t('binary') : diff?.lines?.map((line, i) => <DiffLine key={i} line={line} />) ?? t('diffUnavailable')}</div> : null}</div>
+  return <div className="dsr-file"><div className="dsr-row"><button type="button" onClick={onSelect} title={file.path}>{file.path}<span className="dsr-chip">{label}</span>{file.binary ? <span className="dsr-chip">{t('binary')}</span> : null}{file.staged ? <span className="dsr-chip">{t('staged')}</span> : null}{file.unstaged ? <span className="dsr-chip">{t('unstaged')}</span> : null}</button><span className="dsr-stats"><span className="dsr-add">+{file.additions}</span> <span className="dsr-del">−{file.deletions}</span></span></div></div>
 }
-function DiffLine({ line }: { line: UnifiedDiffLine }) { return <div className={line.kind === 'addition' ? 'dsr-line-add' : line.kind === 'deletion' ? 'dsr-line-del' : undefined}>{line.text || ' '}</div> }
+
+function summaryKey(sessionId: string, seq: number): string { return `${sessionId}:${seq}` }
+function normalizeForMark(path: string): string { return path.replace(/\\/g, '/').replace(/^(?:\.\/)+/, '') }
 
 function ContextPanel({ view }: { view: ContextViewModel }) {
   const [usageOpen, setUsageOpen] = useState(false)
