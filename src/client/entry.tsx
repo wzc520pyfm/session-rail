@@ -6,7 +6,7 @@ import { registerOutputFiles, type UiConversationLike } from './output-model.ts'
 import { selectRailSessionSlice, type JobsClient, type SessionListStateLike, type SessionStatusLike } from './background-model.ts'
 import type { ContextBreakdown, ContextPressure, ContextTimelineProjection, TokenUsageProjection } from '../shared/types.ts'
 
-export const inject = ['slots', 'sidebarRightTabs', 'sidebarRight', 'remote', 'remote.pluginInventory', 'uiConversation']
+export const inject = ['slots', 'sidebarRightTabs', 'sidebarRight', 'remote', 'remote.pluginInventory', 'uiConversation', 'jobs']
 const ID = 'session-rail'
 const KIND = 'session-info'
 
