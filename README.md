@@ -1,6 +1,6 @@
 # DSH Session Rail
 
-A per-session right sidebar preview for DeepSeek Harness (DSH). It displays Environment, Context, Plugins, Output files, and Git Changes in that order.
+A per-session right sidebar preview for DeepSeek Harness (DSH). It displays Environment, Context, Plugins, Output files, Git Changes, and Background tasks in that order.
 
 ## Requirements
 
@@ -32,4 +32,6 @@ Changes lists the Session workspace's current Git working-tree files, staged/uns
 
 Selecting a working-tree file opens the official `changes-review` tab on the latest turn whose summary lists that path. If the path is not in any recorded summary, Session Rail opens a Sidebar preview of the current file with `fileAddressFor`. It does not expand an inline raw unified diff, and it does not use `codex-review` as the default target. The `Review page` field remains as an optional override: when it is non-empty, Session Rail tries `openTab(kind)` first and then falls back to the official review or file preview if that kind cannot be opened. If `openResource` fails, a short status message is shown. The field still offers every active page tab published by the DSH `sidebarRightTabs` registry as a suggestion (resource-only types such as `changes-review`, which cannot be opened by kind, are omitted). The choice is stored in browser `localStorage`.
 
-The sidebar tab is available from the right-sidebar tab picker and from the small button in the Session header. Switching Sessions uses that Session's own workspace, output-file announcements, and context projections.
+Background tasks sits below Changes and lists this Session's background jobs and sub-agents in one card. In-progress rows show a truncated title, a live elapsed time, and — for running jobs — a Stop control that follows the official two-step confirm: the first click arms it, and a second click within 3 seconds calls `ctx.jobs.kill`. Job rows come from the official `ctx.jobs` service (`job.list` via `watchRows`). This MVP does not draw a custom terminal or call `job.follow`. Sub-agents come from the session's public `subagentCatalog` projection, enriched with `subagentTiming` and running state from `useSessions` / `useSessionStatus` when those are available. Clicking a local sub-agent opens the official Sidebar chat at `dsh-resource://subagentchat/session/<child>?parent=<parent>&mode=<mode>`. External tasks are listed but are not navigable. Completed jobs and sub-agents fold behind “N finished” / 「已完成 N 项」. An empty session shows a short empty state; a catalog read failure shows an error instead of a fake zero count. The card is read-only except for Stop.
+
+The sidebar tab is available from the right-sidebar tab picker and from the small button in the Session header. Switching Sessions uses that Session's own workspace, output-file announcements, background tasks, and context projections.

@@ -1,9 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { getSnapshot, requestCommit } from './api.ts'
-import { changesReviewAddress, fileAddressFor } from './addresses.ts'
+import { changesReviewAddress, fileAddressFor, subagentChatAddress } from './addresses.ts'
 import { buildContextView, formatDuration, formatTokens, hasProviderUsage } from './context-model.ts'
 import { t } from './i18n.ts'
 import { findLatestChangeMatch, loadChangesSummary, subscribeOutputTurns, type OutputTurnRecord, type SummaryState, type UiConversationLike } from './output-model.ts'
+import { KILL_ARM_MS, formatElapsed, isJobLive, isKillSuccess, isLocalSubagentMode, jobElapsedMs, jobsForSession, readSubagentCatalog, subagentRows, type JobsClient, type JobView, type SessionListStateLike, type SessionStatusLike, type SubagentCatalogEntry, type SubagentRow } from './background-model.ts'
 import { ensureRailStyle } from './styles.ts'
 import type { ChangedFile, ContextBreakdown, ContextCategoryKey, ContextCategoryPart, ContextPressure, ContextTimelineProjection, ContextViewModel, SessionSnapshot, TokenUsageProjection } from '../shared/types.ts'
 
@@ -22,13 +23,17 @@ interface Props {
   openTab?: (kind: string) => unknown
   openResource?: (address: string, options?: OpenResourceOptions) => unknown
   uiConversation?: UiConversationLike
+  jobs?: JobsClient
+  subagentCatalog?: readonly SubagentCatalogEntry[]
+  sessionList?: SessionListStateLike
+  sessionStatus?: ReadonlyMap<string, SessionStatusLike>
 }
 
 const REVIEW_KIND_STORAGE = 'session-rail:selected-review-kind'
 const LEGACY_DEFAULT_KIND = 'codex-review'
 
 export function RailPane(props: Props): React.ReactElement {
-  const { sessionId, cwd, pressure, breakdown, usage, timeline, loadPlugins, activeTabs = [], openTab, openResource, uiConversation } = props
+  const { sessionId, cwd, pressure, breakdown, usage, timeline, loadPlugins, activeTabs = [], openTab, openResource, uiConversation, jobs, subagentCatalog, sessionList, sessionStatus } = props
   const [snapshot, setSnapshot] = useState<SessionSnapshot | null>(null)
   const [snapshotError, setSnapshotError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -43,6 +48,13 @@ export function RailPane(props: Props): React.ReactElement {
   const [outputTurns, setOutputTurns] = useState<readonly OutputTurnRecord[] | 'unavailable'>([])
   const [summaries, setSummaries] = useState<Record<string, SummaryState>>({})
   const [outputRevision, setOutputRevision] = useState(0)
+  const [jobRows, setJobRows] = useState<readonly JobView[]>([])
+  const [jobsWatchError, setJobsWatchError] = useState(false)
+  const [jobsKillError, setJobsKillError] = useState(false)
+  const [armedJobId, setArmedJobId] = useState<string | null>(null)
+  const [finishedOpen, setFinishedOpen] = useState(false)
+  const [now, setNow] = useState(() => Date.now())
+  const [openHint, setOpenHint] = useState<string | null>(null)
   useEffect(() => {
     try {
       const saved = localStorage.getItem(REVIEW_KIND_STORAGE) ?? ''
@@ -96,6 +108,72 @@ export function RailPane(props: Props): React.ReactElement {
     // summaries is read only to skip completed entries; outputRevision retriggers retryable errors.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, outputTurns, outputRevision])
+
+  useEffect(() => {
+    setJobsWatchError(false)
+    setJobsKillError(false)
+    setArmedJobId(null)
+    if (!sessionId || !jobs?.state) { setJobRows([]); return }
+    let active = true
+    const sync = () => {
+      if (!active) return
+      try { setJobRows(jobsForSession(jobs.state.getSnapshot(), sessionId)) }
+      catch { if (active) { setJobsWatchError(true); setJobRows([]) } }
+    }
+    let unsubscribe: (() => void) | undefined
+    let release: (() => void) | undefined
+    try {
+      unsubscribe = jobs.state.subscribe(sync)
+      release = jobs.watchRows(sessionId)
+      sync()
+    } catch {
+      if (active) { setJobsWatchError(true); setJobRows([]) }
+    }
+    return () => { active = false; unsubscribe?.(); release?.() }
+  }, [jobs, sessionId])
+
+  useEffect(() => {
+    if (!armedJobId) return
+    const timer = window.setTimeout(() => setArmedJobId(null), KILL_ARM_MS)
+    return () => window.clearTimeout(timer)
+  }, [armedJobId])
+
+  const catalog = readSubagentCatalog(sessionId, subagentCatalog, sessionList)
+  const agents = catalog.status === 'ready' || catalog.status === 'migration-required' ? subagentRows(catalog.entries, sessionList, sessionStatus, now) : []
+  const liveJobs = jobRows.filter(job => isJobLive(job.status))
+  const finishedJobs = jobRows.filter(job => !isJobLive(job.status))
+  const liveAgents = agents.filter(agent => agent.running)
+  const finishedAgents = agents.filter(agent => !agent.running)
+  const hasLiveWork = liveJobs.length > 0 || liveAgents.length > 0
+
+  useEffect(() => {
+    if (!hasLiveWork) return
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [hasLiveWork])
+
+  async function stopJob(jobId: string) {
+    if (!jobs || !sessionId) return
+    if (armedJobId !== jobId) { setArmedJobId(jobId); setJobsKillError(false); return }
+    setArmedJobId(null)
+    try {
+      const result = await jobs.kill(sessionId, jobId)
+      if (!isKillSuccess(result)) setJobsKillError(true)
+      else setJobsKillError(false)
+    } catch { setJobsKillError(true) }
+  }
+
+  function openSubagent(agent: SubagentRow) {
+    setOpenHint(null)
+    if (!isLocalSubagentMode(agent.mode) || !openResource) {
+      if (agent.mode === 'external') return
+      setOpenHint(t('openFailed'))
+      return
+    }
+    try {
+      openResource(subagentChatAddress({ parentSessionId: sessionId, childSessionId: agent.id, mode: agent.mode }))
+    } catch { setOpenHint(t('openFailed')) }
+  }
 
   const context = useMemo(
     () => buildContextView({ pressure, breakdown, usage, timeline }),
@@ -215,6 +293,26 @@ export function RailPane(props: Props): React.ReactElement {
       {files.map(file => <FileRow key={file.path} file={file} onSelect={() => selectWorkingTreeFile(file.path)} />)}
       {snapshotError ? <Status error>{snapshotError}</Status> : null}
     </Card>
+    <Card title={t('backgroundTasks')} collapsed={!!collapsed.background} onToggle={() => toggle('background')}>
+      <BackgroundTasksPanel
+        sessionId={sessionId}
+        jobsAvailable={Boolean(jobs)}
+        jobsWatchError={jobsWatchError}
+        jobsKillError={jobsKillError}
+        catalog={catalog}
+        liveJobs={liveJobs}
+        finishedJobs={finishedJobs}
+        liveAgents={liveAgents}
+        finishedAgents={finishedAgents}
+        now={now}
+        armedJobId={armedJobId}
+        finishedOpen={finishedOpen}
+        openHint={openHint}
+        onToggleFinished={() => setFinishedOpen(value => !value)}
+        onStopJob={stopJob}
+        onOpenSubagent={openSubagent}
+      />
+    </Card>
   </div>
 }
 
@@ -304,6 +402,77 @@ function FileRow({ file, onSelect }: { file: ChangedFile; onSelect: () => void }
 
 function summaryKey(sessionId: string, seq: number): string { return `${sessionId}:${seq}` }
 function normalizeForMark(path: string): string { return path.replace(/\\/g, '/').replace(/^(?:\.\/)+/, '') }
+
+
+function BackgroundTasksPanel({ sessionId, jobsAvailable, jobsWatchError, jobsKillError, catalog, liveJobs, finishedJobs, liveAgents, finishedAgents, now, armedJobId, finishedOpen, openHint, onToggleFinished, onStopJob, onOpenSubagent }: {
+  sessionId: string
+  jobsAvailable: boolean
+  jobsWatchError: boolean
+  jobsKillError: boolean
+  catalog: ReturnType<typeof readSubagentCatalog>
+  liveJobs: readonly JobView[]
+  finishedJobs: readonly JobView[]
+  liveAgents: readonly SubagentRow[]
+  finishedAgents: readonly SubagentRow[]
+  now: number
+  armedJobId: string | null
+  finishedOpen: boolean
+  openHint: string | null
+  onToggleFinished: () => void
+  onStopJob: (jobId: string) => void
+  onOpenSubagent: (agent: SubagentRow) => void
+}) {
+  if (!sessionId) return <Status>{t('noSession')}</Status>
+  const catalogLoading = catalog.status === 'loading'
+  const finishedCount = finishedJobs.length + finishedAgents.length
+  const showTasks = liveJobs.length > 0 || finishedJobs.length > 0
+  const showAgents = liveAgents.length > 0 || finishedAgents.length > 0 || catalog.status === 'migration-required'
+  const empty = liveJobs.length === 0 && finishedJobs.length === 0 && liveAgents.length === 0 && finishedAgents.length === 0 && !catalogLoading
+  return <>
+    {jobsWatchError ? <Status error>{t('jobsError')}</Status> : null}
+    {jobsKillError ? <Status error>{t('jobsKillError')}</Status> : null}
+    {catalog.status === 'error' ? <Status error>{t('catalogError')}</Status> : null}
+    {catalog.status === 'migration-required' ? <Status>{t('catalogMigration')}</Status> : null}
+    {openHint ? <Status error>{openHint}</Status> : null}
+    {catalogLoading && liveAgents.length === 0 && finishedAgents.length === 0 ? <Status>{t('loading')}</Status> : null}
+    {empty && !jobsWatchError && catalog.status !== 'error' ? <Status>{t('backgroundEmpty')}</Status> : null}
+    {showTasks && showAgents ? <div className="dsr-row dsr-muted dsr-task-section">{t('tasks')}</div> : null}
+    {liveJobs.map(job => <JobTaskRow key={`job:${job.id}`} job={job} now={now} armed={armedJobId === job.id} onStop={() => onStopJob(job.id)} />)}
+    {showTasks && showAgents ? <div className="dsr-row dsr-muted dsr-task-section">{t('subagents')}</div> : null}
+    {liveAgents.map(agent => <SubagentTaskRow key={`agent:${agent.id}`} agent={agent} live onOpen={() => onOpenSubagent(agent)} />)}
+    {finishedCount > 0 ? <button type="button" className="dsr-finished" aria-expanded={finishedOpen} onClick={onToggleFinished}>{t('finished')(finishedCount)}<span aria-hidden="true">{finishedOpen ? '⌃' : '⌄'}</span></button> : null}
+    {finishedOpen && finishedJobs.map(job => <JobTaskRow key={`job-done:${job.id}`} job={job} now={now} armed={false} />)}
+    {finishedOpen && finishedAgents.map(agent => <SubagentTaskRow key={`agent-done:${agent.id}`} agent={agent} onOpen={() => onOpenSubagent(agent)} />)}
+  </>
+}
+
+function JobTaskRow({ job, now, armed, onStop }: { job: JobView; now: number; armed: boolean; onStop?: () => void }) {
+  const live = isJobLive(job.status)
+  const canStop = job.status === 'running' && onStop
+  const status = job.status === 'stopping' ? t('stopping') : job.status === 'failed' ? t('jobFailed') : job.status === 'killed' ? t('jobKilled') : !live ? t('jobCompleted') : job.progress
+  return <div className="dsr-task">
+    <div className="dsr-task-main">
+      <span className="dsr-task-title" title={job.label}>{job.label}</span>
+      {status ? <span className="dsr-chip">{status}</span> : null}
+    </div>
+    <span className="dsr-stats">{formatElapsed(jobElapsedMs(job, now))}</span>
+    {canStop ? <button type="button" className={`dsr-stop${armed ? ' dsr-stop-armed' : ''}`} onClick={onStop}>{armed ? t('confirmStop') : t('stop')}</button> : null}
+  </div>
+}
+
+function SubagentTaskRow({ agent, live = false, onOpen }: { agent: SubagentRow; live?: boolean; onOpen: () => void }) {
+  const clickable = isLocalSubagentMode(agent.mode)
+  const title = agent.title
+  return <div className="dsr-task">
+    <div className="dsr-task-main">
+      {clickable
+        ? <button type="button" className="dsr-task-open" onClick={onOpen} title={title}><span className="dsr-task-title">{title}</span></button>
+        : <span className="dsr-task-title" title={title}>{title}</span>}
+      {agent.mode === 'external' ? <span className="dsr-chip">{t('subagentExternal')}</span> : <span className="dsr-chip">{t('subagents')}</span>}
+    </div>
+    <span className="dsr-stats">{agent.elapsedMs > 0 || live ? formatElapsed(agent.elapsedMs) : ''}</span>
+  </div>
+}
 
 function ContextPanel({ view }: { view: ContextViewModel }) {
   const [usageOpen, setUsageOpen] = useState(false)

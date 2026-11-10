@@ -3,6 +3,7 @@ import { RailPane } from './pane.tsx'
 import { ensureRailStyle } from './styles.ts'
 import { t } from './i18n.ts'
 import { registerOutputFiles, type UiConversationLike } from './output-model.ts'
+import type { JobsClient, SessionListStateLike, SessionStatusLike, SubagentCatalogEntry } from './background-model.ts'
 import type { ContextBreakdown, ContextPressure, ContextTimelineProjection, TokenUsageProjection } from '../shared/types.ts'
 
 export const inject = ['slots', 'sidebarRightTabs', 'sidebarRight', 'remote', 'remote.pluginInventory', 'uiConversation']
@@ -14,7 +15,8 @@ interface SlotProps {
   sessionId?: string
   useTabInfo?: () => TabInfo | null
   useProjection?: <T>(name: string) => T | undefined
-  useSessions?: (select: (sessions: unknown) => string | undefined) => string | undefined
+  useSessions?: <S>(select: (sessions: SessionListStateLike) => S, eq?: (a: S, b: S) => boolean) => S
+  useSessionStatus?: <S>(select: (status: ReadonlyMap<string, SessionStatusLike>) => S, eq?: (a: S, b: S) => boolean) => S
 }
 interface PluginItem { moduleName?: string; entryId?: string; fiberPhase?: string | null; enabled?: boolean }
 interface OpenResourceOptions { params?: { index?: number } }
@@ -29,6 +31,7 @@ interface ClientContext {
   sidebarRight?: { openTab(kind: string): unknown; openResource?(address: string, options?: OpenResourceOptions): unknown }
   remote?: { pluginInventory?: { list?: () => Promise<{ entries?: PluginItem[] }> } }
   uiConversation?: UiConversationLike
+  jobs?: JobsClient
   effect?: (fn: () => void | (() => void), label?: string) => void
   inject?: (names: string[], fn: (ctx: ClientContext) => void) => void
 }
@@ -59,6 +62,9 @@ function SessionRailTab(props: SlotProps): React.ReactElement {
   const usage = props.useProjection?.<TokenUsageProjection>('tokenUsage')
   // Optional fine-grained timeline published by dsh-context when installed; absent in stock DSH.
   const timeline = props.useProjection?.<ContextTimelineProjection>('contextTimeline')
+  const subagentCatalog = props.useProjection?.<SubagentCatalogEntry[]>('subagentCatalog')
+  const sessionList = props.useSessions?.(sessions => sessions)
+  const sessionStatus = props.useSessionStatus?.(status => status)
   const inventory = pluginContext?.remote?.pluginInventory
   let tabs: ReadonlyArray<{ kind: string; title: () => string; patterns?: readonly string[] }> = []
   try { tabs = tabsRegistry?.entries?.() ?? tabsRegistry?.getSnapshot?.() ?? [] } catch { /* sidebar registry may be unavailable during startup */ }
@@ -85,6 +91,10 @@ function SessionRailTab(props: SlotProps): React.ReactElement {
     openTab={openTab ? kind => openTab.call(sidebar, kind) : undefined}
     openResource={openResource ? (address, options) => openResource.call(sidebar, address, options) : undefined}
     uiConversation={pluginContext?.uiConversation}
+    jobs={pluginContext?.jobs}
+    subagentCatalog={subagentCatalog}
+    sessionList={sessionList}
+    sessionStatus={sessionStatus}
   />
 }
 

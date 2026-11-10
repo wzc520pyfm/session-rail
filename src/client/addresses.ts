@@ -63,3 +63,22 @@ export function fileAddressFor(sessionId: string, cwd: string | undefined, path:
 export function normalizeWorkspacePath(path: string): string {
   return path.replace(/\\/g, '/').replace(/^(?:\.\/)+/, '')
 }
+
+/** Resource-address prefix of an official Sidebar sub-agent chat tab. */
+export const SUBAGENT_CHAT_ADDRESS = 'dsh-resource://subagentchat/session/'
+
+export interface SubagentChatCoordinates {
+  parentSessionId: string
+  childSessionId: string
+  mode: 'one-shot' | 'continuable' | 'unknown'
+}
+
+/**
+ * Official Sidebar address for a local sub-agent conversation.
+ * Matches `subagentChatAddress` from `@deepseek-ai/dsh-client-ui-subagent`:
+ * `dsh-resource://subagentchat/session/<child>?parent=<parent>&mode=<mode>`.
+ */
+export function subagentChatAddress(address: SubagentChatCoordinates): string {
+  const query = new URLSearchParams({ parent: address.parentSessionId, mode: address.mode })
+  return `${SUBAGENT_CHAT_ADDRESS}${encodeURIComponent(address.childSessionId)}?${query}`
+}
