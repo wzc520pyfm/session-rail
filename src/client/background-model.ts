@@ -1,5 +1,7 @@
 /** Official `ctx.jobs` / `subagentCatalog` shapes used by the Background tasks card. */
 
+import { shallowEqual } from './shallow-equal.ts'
+
 export const KILL_ARM_MS = 3000
 
 export type JobStatus = 'running' | 'stopping' | 'completed' | 'killed' | 'failed'
@@ -118,17 +120,41 @@ export function isCatalogEntry(value: unknown): value is SubagentCatalogEntry {
     && (row.mode === 'one-shot' || row.mode === 'external' || row.mode === 'continuable' || row.mode === 'unknown')
 }
 
+const EMPTY_RAIL_SLICE: SessionListStateLike = Object.freeze({ byId: {}, projectionsBySession: {} })
+
+/** Current session catalog snapshot plus byId / projections for catalog entry ids only. */
+export function selectRailSessionSlice(sessions: SessionListStateLike, sessionId: string): SessionListStateLike {
+  if (!sessionId) return EMPTY_RAIL_SLICE
+  const srcProj = sessions.projectionsBySession
+  const current = srcProj?.[sessionId]
+  const rawCatalog = current?.values?.subagentCatalog
+  const entries = Array.isArray(rawCatalog) ? rawCatalog.filter(isCatalogEntry) : []
+  const byId: Record<string, SessionSummaryLike> = {}
+  const projectionsBySession: Record<string, SessionProjectionSnapshotLike> = {}
+  if (current) projectionsBySession[sessionId] = current
+  for (const entry of entries) {
+    const summary = sessions.byId?.[entry.id]
+    if (summary) byId[entry.id] = summary
+    const projection = srcProj?.[entry.id]
+    if (projection) projectionsBySession[entry.id] = projection
+  }
+  if (Object.keys(byId).length === 0 && Object.keys(projectionsBySession).length === 0) return EMPTY_RAIL_SLICE
+  return { byId, projectionsBySession }
+}
+
+/** Two-level shallow compare: derived records are new objects, store values should keep identity. */
+export function railSessionSliceEqual(a: SessionListStateLike, b: SessionListStateLike): boolean {
+  return shallowEqual(a.byId, b.byId) && shallowEqual(a.projectionsBySession, b.projectionsBySession)
+}
+
 export function readSubagentCatalog(
   sessionId: string,
-  projected: unknown,
   list: SessionListStateLike | undefined,
 ): CatalogRead {
   const snap = sessionId ? list?.projectionsBySession?.[sessionId] : undefined
-  const fromSnap = Array.isArray(snap?.values?.subagentCatalog)
+  const entries = Array.isArray(snap?.values?.subagentCatalog)
     ? (snap!.values!.subagentCatalog as unknown[]).filter(isCatalogEntry)
     : undefined
-  const fromHook = Array.isArray(projected) ? projected.filter(isCatalogEntry) : undefined
-  const entries = fromSnap ?? fromHook
   if (snap?.state === 'error') return { status: 'error' }
   if (snap?.state === 'migration-required') return { status: 'migration-required', entries: entries ?? [] }
   if (snap?.state === 'loading' && entries === undefined) return { status: 'loading' }

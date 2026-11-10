@@ -4,7 +4,7 @@ import { changesReviewAddress, fileAddressFor, subagentChatAddress } from './add
 import { buildContextView, formatDuration, formatTokens, hasProviderUsage } from './context-model.ts'
 import { t } from './i18n.ts'
 import { findLatestChangeMatch, loadChangesSummary, subscribeOutputTurns, type OutputTurnRecord, type SummaryState, type UiConversationLike } from './output-model.ts'
-import { KILL_ARM_MS, formatElapsed, isJobLive, isKillSuccess, isLocalSubagentMode, jobElapsedMs, jobsForSession, readSubagentCatalog, subagentRows, type JobsClient, type JobView, type SessionListStateLike, type SessionStatusLike, type SubagentCatalogEntry, type SubagentRow } from './background-model.ts'
+import { KILL_ARM_MS, formatElapsed, isJobLive, isKillSuccess, isLocalSubagentMode, jobElapsedMs, jobsForSession, readSubagentCatalog, subagentRows, type JobsClient, type JobView, type SessionListStateLike, type SessionStatusLike, type SubagentRow } from './background-model.ts'
 import { ensureRailStyle } from './styles.ts'
 import type { ChangedFile, ContextBreakdown, ContextCategoryKey, ContextCategoryPart, ContextPressure, ContextTimelineProjection, ContextViewModel, SessionSnapshot, TokenUsageProjection } from '../shared/types.ts'
 
@@ -24,7 +24,6 @@ interface Props {
   openResource?: (address: string, options?: OpenResourceOptions) => unknown
   uiConversation?: UiConversationLike
   jobs?: JobsClient
-  subagentCatalog?: readonly SubagentCatalogEntry[]
   sessionList?: SessionListStateLike
   sessionStatus?: ReadonlyMap<string, SessionStatusLike>
 }
@@ -33,7 +32,7 @@ const REVIEW_KIND_STORAGE = 'session-rail:selected-review-kind'
 const LEGACY_DEFAULT_KIND = 'codex-review'
 
 export function RailPane(props: Props): React.ReactElement {
-  const { sessionId, cwd, pressure, breakdown, usage, timeline, loadPlugins, activeTabs = [], openTab, openResource, uiConversation, jobs, subagentCatalog, sessionList, sessionStatus } = props
+  const { sessionId, cwd, pressure, breakdown, usage, timeline, loadPlugins, activeTabs = [], openTab, openResource, uiConversation, jobs, sessionList, sessionStatus } = props
   const [snapshot, setSnapshot] = useState<SessionSnapshot | null>(null)
   const [snapshotError, setSnapshotError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -138,7 +137,7 @@ export function RailPane(props: Props): React.ReactElement {
     return () => window.clearTimeout(timer)
   }, [armedJobId])
 
-  const catalog = readSubagentCatalog(sessionId, subagentCatalog, sessionList)
+  const catalog = readSubagentCatalog(sessionId, sessionList)
   const agents = catalog.status === 'ready' || catalog.status === 'migration-required' ? subagentRows(catalog.entries, sessionList, sessionStatus, now) : []
   const liveJobs = jobRows.filter(job => isJobLive(job.status))
   const finishedJobs = jobRows.filter(job => !isJobLive(job.status))

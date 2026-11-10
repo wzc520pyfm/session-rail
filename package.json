@@ -1,6 +1,6 @@
 {
   "name": "session-rail",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Session-scoped environment, context, plugins, review navigation and Agent commit requests in the DSH right sidebar.",
   "type": "module",
   "main": "./lib/index.js",
