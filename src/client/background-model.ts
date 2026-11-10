@@ -123,8 +123,8 @@ export function isCatalogEntry(value: unknown): value is SubagentCatalogEntry {
 const EMPTY_RAIL_SLICE: SessionListStateLike = Object.freeze({ byId: {}, projectionsBySession: {} })
 
 /** Current session catalog snapshot plus byId / projections for catalog entry ids only. */
-export function selectRailSessionSlice(sessions: SessionListStateLike, sessionId: string): SessionListStateLike {
-  if (!sessionId) return EMPTY_RAIL_SLICE
+export function selectRailSessionSlice(sessions: SessionListStateLike | null | undefined, sessionId: string): SessionListStateLike {
+  if (!sessions || !sessionId) return EMPTY_RAIL_SLICE
   const srcProj = sessions.projectionsBySession
   const current = srcProj?.[sessionId]
   const rawCatalog = current?.values?.subagentCatalog
@@ -143,7 +143,8 @@ export function selectRailSessionSlice(sessions: SessionListStateLike, sessionId
 }
 
 /** Two-level shallow compare: derived records are new objects, store values should keep identity. */
-export function railSessionSliceEqual(a: SessionListStateLike, b: SessionListStateLike): boolean {
+export function railSessionSliceEqual(a: SessionListStateLike | null | undefined, b: SessionListStateLike | null | undefined): boolean {
+  if (a == null || b == null) return a === b
   return shallowEqual(a.byId, b.byId) && shallowEqual(a.projectionsBySession, b.projectionsBySession)
 }
 

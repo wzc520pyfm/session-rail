@@ -3,7 +3,7 @@ import { RailPane } from './pane.tsx'
 import { ensureRailStyle } from './styles.ts'
 import { t } from './i18n.ts'
 import { registerOutputFiles, type UiConversationLike } from './output-model.ts'
-import { railSessionSliceEqual, selectRailSessionSlice, type JobsClient, type SessionListStateLike, type SessionStatusLike } from './background-model.ts'
+import { selectRailSessionSlice, type JobsClient, type SessionListStateLike, type SessionStatusLike } from './background-model.ts'
 import type { ContextBreakdown, ContextPressure, ContextTimelineProjection, TokenUsageProjection } from '../shared/types.ts'
 
 export const inject = ['slots', 'sidebarRightTabs', 'sidebarRight', 'remote', 'remote.pluginInventory', 'uiConversation']
@@ -57,14 +57,19 @@ function SessionRailTabSlot(props: SlotProps): React.ReactElement {
   return <RailTabErrorBoundary key={sessionId}><SessionRailTab {...props} /></RailTabErrorBoundary>
 }
 
-class RailTabErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean }> {
-  state = { hasError: false }
-  static getDerivedStateFromError(): { hasError: boolean } {
-    return { hasError: true }
+class RailTabErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean; message?: string }> {
+  state: { hasError: boolean; message?: string } = { hasError: false }
+  static getDerivedStateFromError(error: unknown): { hasError: boolean; message?: string } {
+    const message = error instanceof Error ? error.message : String(error)
+    return { hasError: true, message }
+  }
+  componentDidCatch(error: Error): void {
+    console.error(error.message)
   }
   render(): React.ReactNode {
     if (this.state.hasError) {
-      return <div className="dsr"><div className="dsr-error" role="alert">{t('tabError')}</div></div>
+      const detail = this.state.message ? ` ${this.state.message}` : ''
+      return <div className="dsr"><div className="dsr-error" role="alert">{t('tabError')}{detail}</div></div>
     }
     return this.props.children
   }
@@ -84,8 +89,10 @@ function SessionRailTab(props: SlotProps): React.ReactElement {
   const timeline = props.useProjection?.<ContextTimelineProjection>('contextTimeline')
   const useSessions = props.useSessions
   const useSessionStatus = props.useSessionStatus
-  const sessionList = useSessions(sessions => selectRailSessionSlice(sessions, sessionId), railSessionSliceEqual)
+  const byId = useSessions(state => state.byId)
+  const projectionsBySession = useSessions(state => state.projectionsBySession)
   const sessionStatus = useSessionStatus(status => status)
+  const sessionList = selectRailSessionSlice({ byId, projectionsBySession }, sessionId)
   const inventory = pluginContext?.remote?.pluginInventory
   let tabs: ReadonlyArray<{ kind: string; title: () => string; patterns?: readonly string[] }> = []
   try { tabs = tabsRegistry?.entries?.() ?? tabsRegistry?.getSnapshot?.() ?? [] } catch { /* sidebar registry may be unavailable during startup */ }
