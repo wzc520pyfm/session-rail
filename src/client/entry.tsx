@@ -3,7 +3,7 @@ import { RailPane } from './pane.tsx'
 import { ensureRailStyle } from './styles.ts'
 import { t } from './i18n.ts'
 import { registerOutputFiles, type UiConversationLike } from './output-model.ts'
-import type { JobsClient, SessionListStateLike, SessionStatusLike, SubagentCatalogEntry } from './background-model.ts'
+import { railSessionSliceEqual, selectRailSessionSlice, type JobsClient, type SessionListStateLike, type SessionStatusLike } from './background-model.ts'
 import type { ContextBreakdown, ContextPressure, ContextTimelineProjection, TokenUsageProjection } from '../shared/types.ts'
 
 export const inject = ['slots', 'sidebarRightTabs', 'sidebarRight', 'remote', 'remote.pluginInventory', 'uiConversation']
@@ -15,8 +15,8 @@ interface SlotProps {
   sessionId?: string
   useTabInfo?: () => TabInfo | null
   useProjection?: <T>(name: string) => T | undefined
-  useSessions?: <S>(select: (sessions: SessionListStateLike) => S, eq?: (a: S, b: S) => boolean) => S
-  useSessionStatus?: <S>(select: (status: ReadonlyMap<string, SessionStatusLike>) => S, eq?: (a: S, b: S) => boolean) => S
+  useSessions: <S>(select: (sessions: SessionListStateLike) => S, eq?: (a: S, b: S) => boolean) => S
+  useSessionStatus: <S>(select: (status: ReadonlyMap<string, SessionStatusLike>) => S, eq?: (a: S, b: S) => boolean) => S
 }
 interface PluginItem { moduleName?: string; entryId?: string; fiberPhase?: string | null; enabled?: boolean }
 interface OpenResourceOptions { params?: { index?: number } }
@@ -41,13 +41,33 @@ export function apply(ctx: ClientContext): void {
   pluginContext = ctx
   ensureRailStyle()
   const register = () => {
-    ctx.effect?.(() => ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({ name: 'sidebar.right.pane.tab', key: ID }, SessionRailTab)), 'session-rail: tab body')
+    ctx.effect?.(() => ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({ name: 'sidebar.right.pane.tab', key: ID }, SessionRailTabSlot)), 'session-rail: tab body')
     ctx.effect?.(() => ctx.sidebarRightTabs?.register?.({ id: ID, kind: KIND, priority: 'extension', keepMounted: true, title: () => t('environment') }) ?? (() => undefined), 'session-rail: tab type')
     ctx.effect?.(() => ctx.slots.inject('conversation.session.header.utilities', () => ctx.slots.register({ name: 'conversation.session.header.utilities', id: ID, order: 16 }, SessionRailOpener)), 'session-rail: opener')
     ctx.effect?.(() => registerOutputFiles(ctx.uiConversation), 'session-rail: output files')
   }
   if (ctx.inject) ctx.inject(['slots', 'sidebarRightTabs', 'sidebarRight', 'remote.pluginInventory', 'uiConversation'], register)
   else register()
+}
+
+/** Host-mounted tab entry. Must wrap SessionRailTab so hook throws stay inside the panel. */
+function SessionRailTabSlot(props: SlotProps): React.ReactElement {
+  const info = props.useTabInfo?.()
+  const sessionId = props.sessionId || info?.sessionId || info?.tab?.sessionId || ''
+  return <RailTabErrorBoundary key={sessionId}><SessionRailTab {...props} /></RailTabErrorBoundary>
+}
+
+class RailTabErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean }> {
+  state = { hasError: false }
+  static getDerivedStateFromError(): { hasError: boolean } {
+    return { hasError: true }
+  }
+  render(): React.ReactNode {
+    if (this.state.hasError) {
+      return <div className="dsr"><div className="dsr-error" role="alert">{t('tabError')}</div></div>
+    }
+    return this.props.children
+  }
 }
 
 function SessionRailTab(props: SlotProps): React.ReactElement {
@@ -62,9 +82,10 @@ function SessionRailTab(props: SlotProps): React.ReactElement {
   const usage = props.useProjection?.<TokenUsageProjection>('tokenUsage')
   // Optional fine-grained timeline published by dsh-context when installed; absent in stock DSH.
   const timeline = props.useProjection?.<ContextTimelineProjection>('contextTimeline')
-  const subagentCatalog = props.useProjection?.<SubagentCatalogEntry[]>('subagentCatalog')
-  const sessionList = props.useSessions?.(sessions => sessions)
-  const sessionStatus = props.useSessionStatus?.(status => status)
+  const useSessions = props.useSessions
+  const useSessionStatus = props.useSessionStatus
+  const sessionList = useSessions(sessions => selectRailSessionSlice(sessions, sessionId), railSessionSliceEqual)
+  const sessionStatus = useSessionStatus(status => status)
   const inventory = pluginContext?.remote?.pluginInventory
   let tabs: ReadonlyArray<{ kind: string; title: () => string; patterns?: readonly string[] }> = []
   try { tabs = tabsRegistry?.entries?.() ?? tabsRegistry?.getSnapshot?.() ?? [] } catch { /* sidebar registry may be unavailable during startup */ }
@@ -92,7 +113,6 @@ function SessionRailTab(props: SlotProps): React.ReactElement {
     openResource={openResource ? (address, options) => openResource.call(sidebar, address, options) : undefined}
     uiConversation={pluginContext?.uiConversation}
     jobs={pluginContext?.jobs}
-    subagentCatalog={subagentCatalog}
     sessionList={sessionList}
     sessionStatus={sessionStatus}
   />
